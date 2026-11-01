@@ -15,13 +15,9 @@ jobs:
           node-version: '22'
       - name: Syntax and source contracts
         run: |
-          node --check dist/app.js
-          node --check dist/core.js
-          node --check dist/model-cache.js
-          node --check dist/view3d.js
-          node --check dist/sw.js
+          find dist -name '*.js' -not -path '*/vendor/*' -print0 | xargs -0 -n1 node --check
           node --check serve.mjs
-          node --test tests/core.test.mjs
+          node --test tests/*.test.mjs
   onnx-contract:
     runs-on: ubuntu-latest
     steps:
@@ -29,12 +25,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install onnxruntime==1.23.2 numpy==2.2.6 pillow==11.3.0
+      - run: pip install onnx==1.17.0 onnxruntime==1.23.2 numpy==2.2.6 pillow==11.3.0
       - name: Install sample video decoder
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
       - uses: actions/cache@v4
         with:
           path: .model-cache
-          key: rtmw3dx-a4f0d54c-rtmdets-6bdd0110
-      - name: Verify actual ONNX and CPU inference
-        run: python scripts/verify-model.py
+          key: instanthmr-3504446f
+      - name: Verify original InstantHMR and actual CPU inference
+        run: python scripts/verify-instanthmr.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test browser decoder against actual model reference
+        run: node --test tests/*.test.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instanthmr-numerical-verification
+          path: verification/instant/
