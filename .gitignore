@@ -6,3 +6,5 @@ node_modules/
 *.tar.gz
 .sites-runtime/
 .sites-checkout-*/
+.model-cache/
+__pycache__/

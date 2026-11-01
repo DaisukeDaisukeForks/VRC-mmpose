@@ -30,6 +30,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install onnxruntime==1.23.2 numpy==2.2.6 pillow==11.3.0
+      - name: Install sample video decoder
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
       - uses: actions/cache@v4
         with:
           path: .model-cache
