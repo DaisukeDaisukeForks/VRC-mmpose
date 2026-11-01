@@ -1,6 +1,6 @@
 import {clamp}from './core.js';
-import {BODY_EDGES,HAND_EDGES,FACE_EDGES,FACE_IDS,HAND_IDS,groupOf}from './instanthmr.js';
-// MHR70 renderer; local metres are root-centred and Y-up only for display.
+import {BODY_EDGES,HAND_EDGES,FACE_EDGES,FACE_IDS,HAND_IDS,groupOf}from './rtmw2d.js';
+// COCO133 renderer; depth is a constrained monocular estimate.
 export class PoseView{
   constructor(canvas){
     this.canvas=canvas;this.ctx=canvas.getContext('2d');this.yaw=.22;this.pitch=.12;this.zoom=1;this.points=null;this.world=false;this.threshold=.3;this.showHands=true;this.showFace=true;
@@ -40,6 +40,11 @@ export class PoseView{
       const xs=plane.map(p=>p[0]),ys=plane.map(p=>p[1]),left=Math.min(...xs),right=Math.max(...xs),bottom=Math.min(...ys),top=Math.max(...ys);
       this.fit={x:(left+right)/2,y:(bottom+top)/2,scale:Math.min(w*.82/Math.max(.5,right-left),h*.82/Math.max(1.2,top-bottom))};
     }else this.fit=null;
+    // Keep the calibrated world viewport fixed so lateral/forward movement remains visible.
+    if(this.world&&this.fit){
+      if(this.worldFit&&this.worldFitOrigin===this.worldOrigin)this.fit=this.worldFit;
+      else{this.worldFit={...this.fit};this.worldFitOrigin=this.worldOrigin;}
+    }
     const floor=this.world?-.8:-.95;
     for(let i=-10;i<=10;i++){const p=i*.25;drawLine([p,floor,-2.5],[p,floor,2.5],i===0?'#3e5c47':'#244638');drawLine([-2.5,floor,p],[2.5,floor,p],i===0?'#3e5c47':'#244638');}
     if(!this.points)return;

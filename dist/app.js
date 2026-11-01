@@ -1,7 +1,7 @@
 import {MEAN,STD,clamp,normalizeRGBA,selectBox,calibrationFromValues,OneEuro,percentile}from './core.js';
-import {POSE,BODY_EDGES,HAND_EDGES,FACE_EDGES,FACE_IDS,HAND_IDS,BODY_IDS,groupOf,personROI,cliffCondition,decodeInstant,estimateDistance,bboxFromPoints,inputTensor,probeInput,checkProbe}from './instanthmr.js';
+import {POSE,BODY_EDGES,HAND_EDGES,FACE_EDGES,FACE_IDS,HAND_IDS,BODY_IDS,groupOf,personROI,decode2D,lift2D,bboxFromPoints}from './rtmw2d.js';
 import {initRuntime as loadRuntime,RUNTIME_VERSION}from './runtime.js';
-import {MODELS,MODEL_CACHE,loadModel,cacheSummary,validateModel}from './model-cache.js';
+import {MODELS,MODEL_VARIANTS,MODEL_CACHE,loadModel,cacheSummary,validateModel}from './model-cache.js';
 import {PoseView}from './view3d.js';
 
 const $=id=>document.getElementById(id),video=$('source-video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
@@ -28,13 +28,13 @@ function updateDiagnostics(){
     state.modelInfo?`SHA-256: ${state.modelInfo.sha256}\nCache source: ${state.modelInfo.source}`:'',
     state.session?`Inputs: ${state.session.inputNames.join(', ')}\nOutputs: ${state.session.outputNames.join(', ')}\nOutput shape: ${JSON.stringify(state.warmupShape)}\nWarm-up: ${state.warmupMs?.toFixed(1)} ms (計測から除外)`:'',
     `Calibration: ${state.calibration?.kind||'none'} / no fixed root depth / no floor clamping`,
-    `Numerical startup check: ${JSON.stringify(state.probeDeltas)} / MHR70 / no joint confidence output`,
+    `Depth: constrained monocular estimate / COCO133 / 2D SimCC + constrained monocular depth`,
     `Latest pose lag: ${state.points?Math.max(0,video.currentTime-(state.poseMediaTime??video.currentTime)).toFixed(3)+' s':'none'} / one inference in flight`,
     `Records: ${state.records.length} / GPU memory: browser APIから未計測`,
     ...state.logs.slice(-12)].filter(Boolean).join('\n');
 }
 async function refreshCache(){const s=await cacheSummary();$('cache-summary').textContent=s.error?'キャッシュを開けません':`${s.count}モデル保存済み${s.storage?.usage?` · 使用 ${mb(s.storage.usage)}`:''}`;return s;}
-function enableControls(){const loaded=!!video.videoWidth,ready=!!state.session&&!state.loading&&!state.needsReload;$('run').disabled=!(loaded&&ready)||state.busy&&!state.running;$('step').disabled=!(loaded&&ready)||state.running||state.busy;$('play').disabled=!loaded;$('timeline').disabled=!loaded;$('load-model').disabled=state.loading||state.running||state.busy;$('wasm-mode').disabled=state.loading||state.running||state.busy;$('local-model').disabled=state.loading||state.running||state.busy;}
+function enableControls(){const loaded=!!video.videoWidth,ready=!!state.session&&!state.loading&&!state.needsReload;$('run').disabled=!(loaded&&ready)||state.busy&&!state.running;$('step').disabled=!(loaded&&ready)||state.running||state.busy;$('play').disabled=!loaded;$('timeline').disabled=!loaded;$('load-model').disabled=state.loading||state.running||state.busy;$('wasm-mode').disabled=state.loading||state.running||state.busy;$('local-model').disabled=state.loading||state.running||state.busy;$('model-select').disabled=state.loading||state.running||state.busy;}
 
 async function initRuntime(){
   if(state.ort)return state.ort;
@@ -59,25 +59,20 @@ async function prepareModel(){
     if(state.detector){await state.detector.release();state.detector=null;}
     let model;
     if(state.localModel){const bytes=new Uint8Array(await state.localModel.arrayBuffer());model={bytes,sha256:await validateModel(bytes,MODELS.pose),source:'local-file'};}
-    else model=await loadModel(MODELS.pose,p=>progress('InstantHMR',p));
+    else model=await loadModel(MODELS.pose,p=>progress(MODELS.pose.name,p));
     state.modelInfo={sha256:model.sha256,source:model.source,bytes:model.bytes.byteLength,warning:model.warning};
-    const ref=await fetch('./instant-reference.json');if(!ref.ok)throw Error('数値照合用データを取得できません');state.reference=await ref.json();
-    if(state.reference.modelSha256!==model.sha256)throw Error('モデルと数値照合用データのSHA-256が一致しません');
-    // Validate a real model run against independently computed Actions CPU results.
     const layouts=state.backend==='webgpu'?['NHWC','NCHW']:['NCHW'];let lastError;
     for(const layout of layouts){
-      state.layout=layout;$('model-status').textContent=`実モデルの初回推論と数値照合中 · ${layout}`;
+      state.layout=layout;$('model-status').textContent='実モデルの初回推論を実行中';
       try{
-        state.session=await ort.InferenceSession.create(model.bytes,{executionProviders:state.backend==='webgpu'?[{name:'webgpu',preferredLayout:layout}]:['wasm'],graphOptimizationLevel:'all',enableMemPattern:true});
-        if(state.session.inputNames.length!==2||!state.session.inputNames.includes('image')||!state.session.inputNames.includes('cliff_cond'))throw Error('InstantHMRの2入力契約が一致しません');
-        const feeds=poseFeeds(probeInput(),new Float32Array([0,0,1])),warmStart=performance.now();let out;
-        try{out=await state.session.run(feeds);state.warmupMs=performance.now()-warmStart;state.warmupShape=Object.fromEntries(Object.entries(out).map(([k,v])=>[k,v.dims]));state.probeDeltas=checkProbe(out,state.reference);}
+        state.session=await ort.InferenceSession.create(model.bytes,{executionProviders:state.backend==='webgpu'?[{name:'webgpu',preferredLayout:layout}]:['wasm'],graphOptimizationLevel:'all'});
+        const feeds=poseFeeds(new Float32Array(3*192*256)),started=performance.now();let out;
+        try{out=await state.session.run(feeds);decode2D(out,{x:0,y:0,width:192,height:256},192,256);state.warmupMs=performance.now()-started;state.warmupShape=Object.fromEntries(Object.entries(out).map(([k,v])=>[k,v.dims]));}
         finally{Object.values(feeds).forEach(t=>t.dispose());if(out)Object.values(out).forEach(t=>t.dispose());}
         lastError=null;break;
-      }catch(e){lastError=e;log(`${layout}: ${e.message}`);if(state.session)await state.session.release().catch(()=>{});state.session=null;}
+      }catch(e){lastError=e;log(layout+': '+e.message);if(state.session)await state.session.release().catch(()=>{});state.session=null;}
     }
-    model.bytes=null;if(lastError)throw lastError;
-    log(`Warm-up / numerical check succeeded ${state.warmupMs.toFixed(1)}ms ${JSON.stringify(state.probeDeltas)}`);
+    model.bytes=null;if(lastError)throw lastError;log('Actual RTMW warm-up succeeded');
     state.needsReload=false;$('model-status').textContent=`推論確認済み · ${state.backend==='webgpu'?'WebGPU':'WASM（CPU診断）'}`;$('download-size').textContent='SHA-256 一致';$('model-progress').value=100;$('load-model').innerHTML='再読み込み <span>↻</span>';
     if(state.modelInfo.warning)error(state.modelInfo.warning,'推論は実行できます');
     if(video.videoWidth)await inferFrame(false);
@@ -94,8 +89,10 @@ async function prepareDetector(){
   state.detector=await ort.InferenceSession.create(model.bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
   model.bytes=null;state.detectorError=null;log(`Detector loaded: ${state.detector.inputNames} → ${state.detector.outputNames} (WASM / NMS)`);
 }
-function poseFeeds(image,condition){
-  return{image:inputTensor(state.ort,image,[1,3,224,224],state.reference.inputs.image.type),cliff_cond:inputTensor(state.ort,condition,[1,3],state.reference.inputs.cliff_cond.type)};
+function poseFeeds(image){return{input:new state.ort.Tensor('float32',image,[1,3,256,192])};}
+function solvePose(points,dt=1/60,previous=state.previousDistance){
+  const c=state.calibration||calibrationFromValues({height:num('height'),fov:num('fov'),cameraHeight:num('camera-height'),cameraPitch:num('camera-pitch'),thigh:num('thigh'),shin:num('shin')},video.videoWidth,video.videoHeight);
+  return lift2D(points,c,state.threshold,previous,dt,num('depth-direction'));
 }
 async function detectPerson(){
   if(!state.detector){await prepareDetector();$('model-status').textContent='推論確認済み · 自動切り抜き有効';}
@@ -146,12 +143,12 @@ function displayPoints(){return state.displayPoints||state.points;}
 function updatePoseUI(){
   const p=state.points;drawInput();
   view.update(displayPoints(),state.distance,{threshold:state.threshold,showHands:$('show-hands').checked,showFace:$('show-face').checked,worldOrigin:state.worldOrigin});
-  $('pose-empty').hidden=!!p;const count=ids=>p?p.filter(p=>p.inFrame&&p.valid&&(!ids||ids.has(p.id))).length:0;
-  $('joint-count').textContent=p?count():'—';$('body-count').textContent=`${p?count(BODY_IDS):'—'} / 23`;$('face-count').textContent=`${p?count(FACE_IDS):'—'} / 5`;$('hand-count').textContent=`${p?count(HAND_IDS):'—'} / 42`;
-  $('confidence-info').textContent=`画面内・有限値の点数 · 関節信頼度の出力なし`;
+  $('pose-empty').hidden=!!p;const count=ids=>p?p.filter(p=>p.inFrame&&p.valid&&p.score>=state.threshold&&(!ids||ids.has(p.id))).length:0;
+  $('joint-count').textContent=p?count():'—';$('body-count').textContent=`${p?count(BODY_IDS):'—'} / 23`;$('face-count').textContent=`${p?count(FACE_IDS):'—'} / 68`;$('hand-count').textContent=`${p?count(HAND_IDS):'—'} / 42`;
+  $('confidence-info').textContent=`2D信頼度の閾値以上 · 奥行きは模擬推定`;
   $('distance').textContent=state.distance?state.distance.depth.toFixed(2):'—';
-  $('distance-quality').textContent=state.distance?`概算 ±${state.distance.uncertaintyM.toFixed(2)} m · ${state.distance.bonesUsed}骨`:(state.calibration?'有効な骨が不足 / 推定保留':'絶対距離は未校正');
-  $('tracking-state').hidden=!video.videoWidth;$('tracking-state').textContent=p?`${count()} / 70 点`:$('roi-mode').value==='manual'&&!state.manual?'ROI指定待ち':'推論待ち';
+  $('distance-quality').textContent=state.distance?`模擬3D · 骨長残差 ${(state.distance.boneResidual*100).toFixed(1)}% · ${state.distance.floorConstraint?'接地拘束あり':'接地拘束なし'}`:(state.calibration?'有効な骨が不足 / 推定保留':'絶対距離は未校正');
+  $('tracking-state').hidden=!video.videoWidth;$('tracking-state').textContent=p?`${count()} / 133 点`:$('roi-mode').value==='manual'&&!state.manual?'ROI指定待ち':'推論待ち';
 }
 async function inferFrame(record=true){
   if(state.busy||!state.session||!video.videoWidth||video.readyState<2)return null;
@@ -163,25 +160,25 @@ async function inferFrame(record=true){
     // drawImage clips the source at boundaries; a transform preserves virtual, offscreen ROI padding.
     cropCtx.save();cropCtx.setTransform(POSE.width/roi.width,0,0,POSE.height/roi.height,-roi.x*POSE.width/roi.width,-roi.y*POSE.height/roi.height);cropCtx.drawImage(video,0,0);cropCtx.restore();
     const data=normalizeRGBA(cropCtx.getImageData(0,0,POSE.width,POSE.height).data,POSE.width,POSE.height);
-    const feeds=poseFeeds(data,cliffCondition(roi.bbox,video.videoWidth,video.videoHeight)),afterPre=performance.now();
+    const feeds=poseFeeds(data),afterPre=performance.now();
     let out;try{out=await state.session.run(feeds);}finally{Object.values(feeds).forEach(t=>t.dispose());}
     const afterInfer=performance.now();
-    let prediction;try{prediction=decodeInstant(out,roi,video.videoWidth,video.videoHeight);}finally{Object.values(out).forEach(t=>t.dispose());}const points=prediction.points;
+    let prediction;try{prediction={points:decode2D(out,roi,video.videoWidth,video.videoHeight)};}finally{Object.values(out).forEach(t=>t.dispose());}const points=prediction.points;
     if(version!==state.videoVersion)return null;
     const dt=state.lastMediaTime===null?1/60:mediaTime-state.lastMediaTime;
     if(dt<=0||dt>.5){filter.reset();state.previousDistance=null;}
+    const solution=solvePose(points,dt);state.previousDistance=solution;state.distance=state.calibration?solution:null;
     state.points=points;state.prediction=prediction;state.poseMediaTime=mediaTime;
     state.displayPoints=$('smooth').checked?points.map(p=>({...p,x:filter.filter(`${p.id}x`,p.x,mediaTime),y:filter.filter(`${p.id}y`,p.y,mediaTime),relativeDisplay:p.relativeDisplay.map((v,c)=>v===null?null:filter.filter(`${p.id}r${c}`,v,mediaTime))})):points;
-    state.distance=estimateDistance(points,state.calibration,state.threshold,state.previousDistance,dt);state.previousDistance=state.distance;
     if(state.distance&&state.worldOrigin===null)state.worldOrigin=state.distance.worldRootPosition[2];
     if($('roi-mode').value==='auto'){const next=bboxFromPoints(points,state.threshold,video.videoWidth,video.videoHeight);state.bbox=next;}
     state.lastMediaTime=mediaTime;state.frame++;updatePoseUI();
     const end=performance.now(),timing={frame:state.frame,mediaTime,backend:state.backend,detect:afterDetect-start,preprocess:afterPre-afterDetect,pose:afterInfer-afterPre,postprocess:end-afterInfer,total:end-start};
     if(record){
       state.timings.push(timing);state.records.push({frame:state.frame,timeSeconds:mediaTime,source:{width:video.videoWidth,height:video.videoHeight},roi:{...roi},backend:state.backend,
-        predictedCameraTranslation:prediction.camTrans,mhrParams:prediction.mhrParams,shapeParams:prediction.shapeParams,
+        depthMethod:solution?.method??null,depthAmbiguous:true,scaleCalibrated:!!state.calibration,
         points:points.map(p=>({id:p.id,name:p.name,x:p.x,y:p.y,jointRelativeZ:p.relativeZ,relativeModel:p.relativeModel,relativeDisplay:p.relativeDisplay,predictedCameraPosition:p.predictedCameraPosition,
-          cameraPosition:state.distance?.camera[p.id]??null,worldPosition:state.distance?.world[p.id]??null,score:null,confidenceAvailable:false,inFrame:p.inFrame,missing:!p.inFrame||!p.valid})),
+          cameraPosition:state.distance?.camera[p.id]??null,worldPosition:state.distance?.world[p.id]??null,score:p.rawScore,confidenceAvailable:true,depthSource:p.depthSource,inFrame:p.inFrame,missing:!p.inFrame||!p.valid||p.score<state.threshold})),
         rootCameraPosition:state.distance?.rootCameraPosition??null,worldRootPosition:state.distance?.worldRootPosition??null,
         calibration:state.calibration?{kind:state.calibration.kind,quality:state.distance?.quality??'missing',uncertaintyM:state.distance?.uncertaintyM??null}:null,timing});
       updateMetrics(timing);
@@ -286,7 +283,7 @@ $('calibrate').onclick=()=>{
   if(!video.videoWidth){error('校正する動画を先に選択してください。');return;}
   try{state.calibration=calibrationFromValues({height:num('height'),fov:num('fov'),fx:num('fx'),fy:num('fy'),cx:num('cx'),cy:num('cy'),cameraHeight:num('camera-height'),cameraPitch:num('camera-pitch'),thigh:num('thigh'),shin:num('shin')},video.videoWidth,video.videoHeight);
     state.previousDistance=null;state.worldOrigin=null;$('calibration-badge').textContent='単眼・概算';$('calibration-note').textContent='骨長と相対Zから推定。床座標は入力したカメラ位置・角度に依存します。';
-    if(state.points){state.distance=estimateDistance(state.points,state.calibration,state.threshold);if(state.distance)state.worldOrigin=state.distance.worldRootPosition[2];}updatePoseUI();log(`Calibration enabled: ${state.calibration.kind}`);
+    if(state.points){state.distance=solvePose(state.points,1/60,null);state.previousDistance=state.distance;state.displayPoints=null;if(state.distance)state.worldOrigin=state.distance.worldRootPosition[2];}updatePoseUI();log(`Calibration enabled: ${state.calibration.kind}`);
   }catch(e){error(e.message);}
 };
 for(const id of['height','fov','fx','fy','cx','cy','camera-height','camera-pitch','thigh','shin'])$(id).addEventListener('input',()=>{if(state.calibration){state.calibration=null;state.distance=null;state.previousDistance=null;$('calibration-badge').textContent='再校正が必要';updatePoseUI();}});
@@ -300,19 +297,23 @@ canvas.addEventListener('pointermove',e=>{if(!dragStart)return;const p=imagePosi
 canvas.addEventListener('pointerup',async()=>{if(!dragStart)return;dragStart=null;if(state.manual&&state.manual[2]-state.manual[0]>8&&state.manual[3]-state.manual[1]>8){try{await inferFrame(false);}catch(e){error(e.message);}}else{state.manual=null;error('人物の範囲を少し大きく指定してください。');}});
 canvas.addEventListener('pointercancel',()=>dragStart=null);
 function download(name,body,type){const url=URL.createObjectURL(new Blob([body],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-function benchmark(){const ts=state.timings;return{schema:'vrc-instanthmr-benchmark/v2',createdAt:new Date().toISOString(),backend:state.backend,mode:$('execution-mode').value,
-  model:{...MODELS.pose,actual:state.modelInfo},jointLayout:'MHR70',jointNames:JOINT_NAMES_FOR_EXPORT(),detector:state.detectorInfo,runtime:RUNTIME_VERSION,preferredLayout:state.layout,numericalProbe:state.probeDeltas,source:{width:video.videoWidth,height:video.videoHeight,durationSeconds:video.duration||null},
+function benchmark(){const ts=state.timings;return{schema:'vrc-rtmw2d-benchmark/v2',createdAt:new Date().toISOString(),backend:state.backend,mode:$('execution-mode').value,
+  model:{...MODELS.pose,actual:state.modelInfo},jointLayout:'COCO-WholeBody133',jointNames:JOINT_NAMES_FOR_EXPORT(),detector:state.detectorInfo,runtime:RUNTIME_VERSION,preferredLayout:state.layout,numericalProbe:state.probeDeltas,source:{width:video.videoWidth,height:video.videoHeight,durationSeconds:video.duration||null},
   frames:ts.length,wallMs:state.wallMs,processedFPS:ts.length/(state.wallMs/1000||1),poseMs:{p50:percentile(ts.map(t=>t.pose),.5),p95:percentile(ts.map(t=>t.pose),.95)},
   totalMs:{p50:percentile(ts.map(t=>t.total),.5),p95:percentile(ts.map(t=>t.total),.95)},warmupExcludedMs:state.warmupMs,outputs:state.warmupShape,calibration:state.calibration,
-  notes:['GPU memory not measured','RTX 5060 Ti 8GB not validated by this browser benchmark','MHR local model coordinates are metres, X-right Y-down Z-forward; display is hip-centred Y-up','cam_trans is a model prediction, not calibrated floor position','Joint confidence is unavailable, score is null','No camera API / no upload endpoint'],timings:ts};}
+  notes:['GPU memory not measured','RTX 5060 Ti 8GB not validated by this browser benchmark','2D is observed; all depth is monocular constrained estimation, ambiguous in sign','Uncalibrated preview assumes entered height/FOV; absolute camera/world fields remain null','Only calibrated camera/world values use entered camera geometry','No camera API / no upload endpoint'],timings:ts};}
 function JOINT_NAMES_FOR_EXPORT(){return state.points?.map(p=>p.name)??null;}
 $('export-benchmark').onclick=()=>download('vrc-mmpose-benchmark.json',JSON.stringify(benchmark(),null,2),'application/json');
-$('export-json').onclick=()=>download('vrc-instanthmr-poses.json',JSON.stringify({schema:'vrc-instanthmr-poses/v2',benchmark:benchmark(),frames:state.records}),'application/json');
+$('export-json').onclick=()=>download('vrc-rtmw2d-poses.json',JSON.stringify({schema:'vrc-rtmw2d-poses/v2',benchmark:benchmark(),frames:state.records}),'application/json');
 $('export-csv').onclick=()=>{
   const lines=['frame,time_seconds,joint_id,joint_name,x_px,y_px,joint_relative_z_m,raw_score,confidence_available,in_frame,missing,model_local_x_m,model_local_y_m,model_local_z_m,predicted_camera_x_m,predicted_camera_y_m,predicted_camera_z_m,calibrated_camera_x_m,calibrated_camera_y_m,calibrated_camera_z_m,world_x_m,world_y_m,world_z_m,backend'];
-  for(const f of state.records)for(const p of f.points)lines.push([f.frame,f.timeSeconds,p.id,p.name,p.x,p.y,p.jointRelativeZ,'',false,p.inFrame,p.missing,...p.relativeModel,...p.predictedCameraPosition,...(p.cameraPosition||['','','']),...(p.worldPosition||['','','']),f.backend].join(','));
-  download('vrc-instanthmr-poses.csv','\uFEFF'+lines.join('\r\n'),'text/csv;charset=utf-8');
+  for(const f of state.records)for(const p of f.points)lines.push([f.frame,f.timeSeconds,p.id,p.name,p.x,p.y,p.jointRelativeZ,p.score,true,p.inFrame,p.missing,...p.relativeModel,...(p.predictedCameraPosition||['','','']),...(p.cameraPosition||['','','']),...(p.worldPosition||['','','']),f.backend].join(','));
+  download('vrc-rtmw2d-poses.csv','\uFEFF'+lines.join('\r\n'),'text/csv;charset=utf-8');
 };
 window.addEventListener('unhandledrejection',e=>{error(String(e.reason?.message||e.reason));});
 if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(e=>log(`Service worker: ${e.message}`));
+for(const variant of MODEL_VARIANTS){const option=document.createElement('option');option.value=variant.id;option.textContent=variant.name+' · '+mb(variant.size)+(variant.smallFixtureDriftPassed?'':' · 基準との差大');$('model-select').append(option);}
+$('model-select').value=MODELS.pose.id;
+$('model-select').onchange=()=>{stop();MODELS.pose=MODEL_VARIANTS.find(v=>v.id===$('model-select').value);state.localModel=null;state.needsReload=true;resetTracking();$('model-name').textContent=MODELS.pose.name;$('model-description').textContent='256 × 192 · 133点';$('model-status').textContent='モデルを準備してください';enableControls();};
+$('depth-direction').onchange=()=>{state.previousDistance=null;};
 updateDiagnostics();refreshCache();enableControls();
