@@ -1,14 +1,15 @@
 export const MODEL_CACHE='vrc-mmpose-models-v1';
 export const MODELS={
-  pose:{name:'RTMW3D-X',repo:'Soykaf/RTMW3D-x',revision:'a4f0d54c52ee44ee4e1dda1936d714490c6234d2',
-    path:'onnx/rtmw3d-x_8xb64_cocktail14-384x288-b0a0eab7_20240626.onnx',size:369330857,
-    sha256:'4a289c0e99d47eb595e99679d9d4a2d1def1b4241f9adcbafba44b9ff585ebcd'},
+  pose:{name:'InstantHMR',repo:'momolesang/InstantHMR',revision:'3504446fc31e7f76fdb1cd7e463189e7cf0fdd0f',
+    path:'instanthmr.onnx',size:80961622,
+    sha256:'f717558094f57d7c9cd084d7981874dbcc3f08e7308501eb98c12844e2cce3b7'},
   detector:{name:'RTMDet-s',repo:'ziq/rtm',revision:'6bdd0110307167f5f003e92e34099a21bd61283c',path:'rtmdet-s.onnx',size:40309222,sha256:'3bb7246a8b5104dd94e9f9bbfcf92d2cd9e55d344a9a5e8b7b84ebcfeedafe14'}
 };
 export const modelURL=m=>`https://huggingface.co/${m.repo}/resolve/${m.revision}/${m.path}`;
 export async function hashBytes(bytes){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 export async function validateModel(bytes,model){
   if(bytes.byteLength<1000000)throw Error(`${model.name}: 完全なONNXファイルではありません（${bytes.byteLength} bytes）`);
+  if(model.size&&bytes.byteLength!==model.size)throw Error(`${model.name}: ファイル長が一致しません（${bytes.byteLength} / ${model.size} bytes）`);
   const sha256=await hashBytes(bytes);
   if(model.sha256&&sha256!==model.sha256)throw Error(`${model.name}: SHA-256が一致しません。キャッシュを削除して再取得してください`);
   return sha256;

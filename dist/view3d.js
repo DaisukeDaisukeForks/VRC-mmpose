@@ -1,5 +1,6 @@
-import {BODY_EDGES,HAND_EDGES,FACE_EDGES,clamp}from './core.js';
-// A perspective Canvas renderer keeps all 133 points visible without a second GPU session.
+import {clamp}from './core.js';
+import {BODY_EDGES,HAND_EDGES,FACE_EDGES,FACE_IDS,HAND_IDS,groupOf}from './instanthmr.js';
+// MHR70 renderer; local metres are root-centred and Y-up only for display.
 export class PoseView{
   constructor(canvas){
     this.canvas=canvas;this.ctx=canvas.getContext('2d');this.yaw=.22;this.pitch=.12;this.zoom=1;this.points=null;this.world=false;this.threshold=.3;this.showHands=true;this.showFace=true;
@@ -34,8 +35,8 @@ export class PoseView{
     const edges=[...BODY_EDGES.map(e=>[e,'#c4e58f',2]),...(this.showHands?HAND_EDGES.map(e=>[e,'#69c9b2',1.2]):[]),...(this.showFace?FACE_EDGES.map(e=>[e,'#bdaf8f',.75]):[])];
     for(const[[a,b],color,width]of edges)if(visible(a)&&visible(b))drawLine(coords[a],coords[b],color,width);
     for(let i=0;i<coords.length;i++){
-      if(!visible(i)||(i>=23&&i<91&&!this.showFace)||(i>=91&&!this.showHands))continue;
-      const[x,y]=this.project(coords[i],w,h);ctx.beginPath();ctx.arc(x,y,i<23?3:1.3,0,Math.PI*2);ctx.fillStyle=i<23?'#def5af':i<91?'#cbbd9b':'#72dbc0';ctx.fill();
+      if(!visible(i)||(FACE_IDS.has(i)&&!this.showFace)||(HAND_IDS.has(i)&&!this.showHands))continue;
+      const group=groupOf(i),[x,y]=this.project(coords[i],w,h);ctx.beginPath();ctx.arc(x,y,group==='body'?3:1.3,0,Math.PI*2);ctx.fillStyle=group==='body'?'#def5af':group==='face'?'#cbbd9b':'#72dbc0';ctx.fill();
     }
   }
 }
