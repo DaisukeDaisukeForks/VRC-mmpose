@@ -21,7 +21,7 @@ JSONのpredictedCameraPositionは元3D+cam_transというモデル予測。camer
 サーバー4：ネイティブ送出。SteamVRへ仮想トラッカーを渡す。
 4層は4台のPCを意味しない。ルーターだけで閉域を保証せず、LAN/WAN・ファイアウォール・ICE経路・sandbox境界を実測する。現段階でこれらを実装済みと表示しない。
 ## 検証の範囲
-Actionsで元ONNXの入出力と実動画3フレームのCPU推論を検査する。サイト起動時もCPU参照と数値を照合する。WebGPUの数値確認・キャッシュ再利用はActions上の非視覚テストで行う。クラウドブラウザでの視覚確認は行わない。RTX 5060 Ti 8GB / 4070 Ti SUPERでの60fps、距離精度、複数視点、SteamVRは実機検証が必要。
+Actionsで元ONNXの入出力と実動画3フレームのCPU推論を検査する。サイト起動時もCPU参照と数値を照合する。ブラウザを起動するActionsジョブとクラウドブラウザでの視覚確認は行わない。Sites上のPoCで動画を入力し、実機で確認する。RTX 5060 Ti 8GB / 4070 Ti SUPERでの60fps、距離精度、複数視点、SteamVRは実機検証が必要。
 ## 出典
 モデル: https://huggingface.co/momolesang/InstantHMR
 コード: https://github.com/Naturalpad-studio/InstantHMR
