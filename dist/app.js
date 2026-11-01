@@ -1,5 +1,5 @@
 import {MEAN,STD,clamp,normalizeRGBA,selectBox,calibrationFromValues,OneEuro,percentile}from './core.js';
-import {POSE,BODY_EDGES,HAND_EDGES,FACE_EDGES,FACE_IDS,HAND_IDS,BODY_IDS,groupOf,personROI,decode2D,lift2D,bboxFromPoints}from './rtmw2d.js';
+import {POSE,configurePose,locate3D,BODY_EDGES,HAND_EDGES,FACE_EDGES,FACE_IDS,HAND_IDS,BODY_IDS,groupOf,personROI,decode2D,lift2D,bboxFromPoints}from './rtmw2d.js';
 import {initRuntime as loadRuntime,RUNTIME_VERSION}from './runtime.js';
 import {MODELS,MODEL_VARIANTS,MODEL_CACHE,loadModel,cacheSummary,validateModel}from './model-cache.js';
 import {PoseView}from './view3d.js';
@@ -28,7 +28,7 @@ function updateDiagnostics(){
     state.modelInfo?`SHA-256: ${state.modelInfo.sha256}\nCache source: ${state.modelInfo.source}`:'',
     state.session?`Inputs: ${state.session.inputNames.join(', ')}\nOutputs: ${state.session.outputNames.join(', ')}\nOutput shape: ${JSON.stringify(state.warmupShape)}\nWarm-up: ${state.warmupMs?.toFixed(1)} ms (計測から除外)`:'',
     `Calibration: ${state.calibration?.kind||'none'} / no fixed root depth / no floor clamping`,
-    `Depth: constrained monocular estimate / COCO133 / 2D SimCC + constrained monocular depth`,
+    `Depth: ${POSE.is3D?'model relative-Z + calibrated root depth':'2D + constrained pseudo-3D'} / COCO133`,
     `Latest pose lag: ${state.points?Math.max(0,video.currentTime-(state.poseMediaTime??video.currentTime)).toFixed(3)+' s':'none'} / one inference in flight`,
     `Records: ${state.records.length} / GPU memory: browser APIから未計測`,
     ...state.logs.slice(-12)].filter(Boolean).join('\n');
@@ -66,8 +66,8 @@ async function prepareModel(){
       state.layout=layout;$('model-status').textContent='実モデルの初回推論を実行中';
       try{
         state.session=await ort.InferenceSession.create(model.bytes,{executionProviders:state.backend==='webgpu'?[{name:'webgpu',preferredLayout:layout}]:['wasm'],graphOptimizationLevel:'all'});
-        const feeds=poseFeeds(new Float32Array(3*192*256)),started=performance.now();let out;
-        try{out=await state.session.run(feeds);decode2D(out,{x:0,y:0,width:192,height:256},192,256);state.warmupMs=performance.now()-started;state.warmupShape=Object.fromEntries(Object.entries(out).map(([k,v])=>[k,v.dims]));}
+        const feeds=poseFeeds(new Float32Array(3*POSE.width*POSE.height)),started=performance.now();let out;
+        try{out=await state.session.run(feeds);decode2D(out,{x:0,y:0,width:POSE.width,height:POSE.height},POSE.width,POSE.height);state.warmupMs=performance.now()-started;state.warmupShape=Object.fromEntries(Object.entries(out).map(([k,v])=>[k,v.dims]));}
         finally{Object.values(feeds).forEach(t=>t.dispose());if(out)Object.values(out).forEach(t=>t.dispose());}
         lastError=null;break;
       }catch(e){lastError=e;log(layout+': '+e.message);if(state.session)await state.session.release().catch(()=>{});state.session=null;}
@@ -89,10 +89,10 @@ async function prepareDetector(){
   state.detector=await ort.InferenceSession.create(model.bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
   model.bytes=null;state.detectorError=null;log(`Detector loaded: ${state.detector.inputNames} → ${state.detector.outputNames} (WASM / NMS)`);
 }
-function poseFeeds(image){return{input:new state.ort.Tensor('float32',image,[1,3,256,192])};}
+function poseFeeds(image){return{input:new state.ort.Tensor('float32',image,[1,3,POSE.height,POSE.width])};}
 function solvePose(points,dt=1/60,previous=state.previousDistance){
   const c=state.calibration||calibrationFromValues({height:num('height'),fov:num('fov'),cameraHeight:num('camera-height'),cameraPitch:num('camera-pitch'),thigh:num('thigh'),shin:num('shin')},video.videoWidth,video.videoHeight);
-  return lift2D(points,c,state.threshold,previous,dt,num('depth-direction'));
+  return POSE.is3D?locate3D(points,c,state.threshold,previous,dt):lift2D(points,c,state.threshold,previous,dt,num('depth-direction'));
 }
 async function detectPerson(){
   if(!state.detector){await prepareDetector();$('model-status').textContent='推論確認済み · 自動切り抜き有効';}
@@ -145,9 +145,9 @@ function updatePoseUI(){
   view.update(displayPoints(),state.distance,{threshold:state.threshold,showHands:$('show-hands').checked,showFace:$('show-face').checked,worldOrigin:state.worldOrigin});
   $('pose-empty').hidden=!!p;const count=ids=>p?p.filter(p=>p.inFrame&&p.valid&&p.score>=state.threshold&&(!ids||ids.has(p.id))).length:0;
   $('joint-count').textContent=p?count():'—';$('body-count').textContent=`${p?count(BODY_IDS):'—'} / 23`;$('face-count').textContent=`${p?count(FACE_IDS):'—'} / 68`;$('hand-count').textContent=`${p?count(HAND_IDS):'—'} / 42`;
-  $('confidence-info').textContent=`2D信頼度の閾値以上 · 奥行きは模擬推定`;
+  $('confidence-info').textContent=POSE.is3D?'モデルの相対Z出力 · 絶対距離は別途推定':'2D信頼度の閾値以上 · 奥行きは模擬推定';
   $('distance').textContent=state.distance?state.distance.depth.toFixed(2):'—';
-  $('distance-quality').textContent=state.distance?`模擬3D · 骨長残差 ${(state.distance.boneResidual*100).toFixed(1)}% · ${state.distance.floorConstraint?'接地拘束あり':'接地拘束なし'}`:(state.calibration?'有効な骨が不足 / 推定保留':'絶対距離は未校正');
+  $('distance-quality').textContent=state.distance?`${POSE.is3D?'モデル相対Z':'模擬3D'} · 骨長残差 ${(state.distance.boneResidual*100).toFixed(1)}% · ${state.distance.floorConstraint?'接地拘束あり':'接地拘束なし'}`:(state.calibration?'有効な骨が不足 / 推定保留':'絶対距離は未校正');
   $('tracking-state').hidden=!video.videoWidth;$('tracking-state').textContent=p?`${count()} / 133 点`:$('roi-mode').value==='manual'&&!state.manual?'ROI指定待ち':'推論待ち';
 }
 async function inferFrame(record=true){
@@ -176,7 +176,7 @@ async function inferFrame(record=true){
     const end=performance.now(),timing={frame:state.frame,mediaTime,backend:state.backend,detect:afterDetect-start,preprocess:afterPre-afterDetect,pose:afterInfer-afterPre,postprocess:end-afterInfer,total:end-start};
     if(record){
       state.timings.push(timing);state.records.push({frame:state.frame,timeSeconds:mediaTime,source:{width:video.videoWidth,height:video.videoHeight},roi:{...roi},backend:state.backend,
-        depthMethod:solution?.method??null,depthAmbiguous:true,scaleCalibrated:!!state.calibration,
+        depthMethod:solution?.method??(POSE.is3D?'model-root-relative-z':null),modelDimensions:POSE.is3D?3:2,depthAmbiguous:true,scaleCalibrated:!!state.calibration,
         points:points.map(p=>({id:p.id,name:p.name,x:p.x,y:p.y,jointRelativeZ:p.relativeZ,relativeModel:p.relativeModel,relativeDisplay:p.relativeDisplay,predictedCameraPosition:p.predictedCameraPosition,
           cameraPosition:state.distance?.camera[p.id]??null,worldPosition:state.distance?.world[p.id]??null,score:p.rawScore,confidenceAvailable:true,depthSource:p.depthSource,inFrame:p.inFrame,missing:!p.inFrame||!p.valid||p.score<state.threshold})),
         rootCameraPosition:state.distance?.rootCameraPosition??null,worldRootPosition:state.distance?.worldRootPosition??null,
@@ -298,10 +298,10 @@ canvas.addEventListener('pointerup',async()=>{if(!dragStart)return;dragStart=nul
 canvas.addEventListener('pointercancel',()=>dragStart=null);
 function download(name,body,type){const url=URL.createObjectURL(new Blob([body],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function benchmark(){const ts=state.timings;return{schema:'vrc-rtmw2d-benchmark/v2',createdAt:new Date().toISOString(),backend:state.backend,mode:$('execution-mode').value,
-  model:{...MODELS.pose,actual:state.modelInfo},jointLayout:'COCO-WholeBody133',jointNames:JOINT_NAMES_FOR_EXPORT(),detector:state.detectorInfo,runtime:RUNTIME_VERSION,preferredLayout:state.layout,numericalProbe:state.probeDeltas,source:{width:video.videoWidth,height:video.videoHeight,durationSeconds:video.duration||null},
+  model:{...MODELS.pose,actual:state.modelInfo},jointLayout:'COCO-WholeBody133',jointNames:JOINT_NAMES_FOR_EXPORT(),detector:state.detectorInfo,runtime:RUNTIME_VERSION,preferredLayout:state.layout,numericalProbe:state.probeDeltas,modelDimensions:POSE.is3D?3:2,relativeDepthSource:POSE.is3D?'model':'constrained-estimation',source:{width:video.videoWidth,height:video.videoHeight,durationSeconds:video.duration||null},
   frames:ts.length,wallMs:state.wallMs,processedFPS:ts.length/(state.wallMs/1000||1),poseMs:{p50:percentile(ts.map(t=>t.pose),.5),p95:percentile(ts.map(t=>t.pose),.95)},
   totalMs:{p50:percentile(ts.map(t=>t.total),.5),p95:percentile(ts.map(t=>t.total),.95)},warmupExcludedMs:state.warmupMs,outputs:state.warmupShape,calibration:state.calibration,
-  notes:['GPU memory not measured','RTX 5060 Ti 8GB not validated by this browser benchmark','2D is observed; all depth is monocular constrained estimation, ambiguous in sign','Uncalibrated preview assumes entered height/FOV; absolute camera/world fields remain null','Only calibrated camera/world values use entered camera geometry','No camera API / no upload endpoint'],timings:ts};}
+  notes:['GPU memory not measured','RTX 5060 Ti 8GB not validated by this browser benchmark','Depth source follows selected model: RTMW 2D uses constrained estimation, RTMW3D uses model relative-Z; absolute distance remains estimated','Uncalibrated preview assumes entered height/FOV; absolute camera/world fields remain null','Only calibrated camera/world values use entered camera geometry','No camera API / no upload endpoint'],timings:ts};}
 function JOINT_NAMES_FOR_EXPORT(){return state.points?.map(p=>p.name)??null;}
 $('export-benchmark').onclick=()=>download('vrc-mmpose-benchmark.json',JSON.stringify(benchmark(),null,2),'application/json');
 $('export-json').onclick=()=>download('vrc-rtmw2d-poses.json',JSON.stringify({schema:'vrc-rtmw2d-poses/v2',benchmark:benchmark(),frames:state.records}),'application/json');
@@ -314,6 +314,8 @@ window.addEventListener('unhandledrejection',e=>{error(String(e.reason?.message|
 if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(e=>log(`Service worker: ${e.message}`));
 for(const variant of MODEL_VARIANTS){const option=document.createElement('option');option.value=variant.id;option.textContent=variant.name+' · '+mb(variant.size)+(variant.smallFixtureDriftPassed?'':' · 基準との差大');$('model-select').append(option);}
 $('model-select').value=MODELS.pose.id;
-$('model-select').onchange=()=>{stop();MODELS.pose=MODEL_VARIANTS.find(v=>v.id===$('model-select').value);state.localModel=null;state.needsReload=true;resetTracking();$('model-name').textContent=MODELS.pose.name;$('model-description').textContent='256 × 192 · 133点';$('model-status').textContent='モデルを準備してください';enableControls();};
+$('model-select').onchange=()=>{stop();MODELS.pose=MODEL_VARIANTS.find(v=>v.id===$('model-select').value);configureSelectedModel();state.localModel=null;state.needsReload=true;resetTracking();$('model-name').textContent=MODELS.pose.name;$('model-description').textContent=`${POSE.height} × ${POSE.width} · 133点 · ${POSE.is3D?'モデル3D':'2D＋模擬3D'}`;$('model-status').textContent='モデルを準備してください';enableControls();};
 $('depth-direction').onchange=()=>{state.previousDistance=null;};
+function configureSelectedModel(){configurePose(MODELS.pose);crop.width=POSE.width;crop.height=POSE.height;$('depth-direction').disabled=!!POSE.is3D;$('depth-state').textContent=POSE.is3D?'モデル出力の骨盤相対Z':'骨長・時系列からの模擬3D';}
+configureSelectedModel();
 updateDiagnostics();refreshCache();enableControls();

@@ -1,16 +1,36 @@
-import {makeROI,clamp,worldPoint,BODY_EDGES,HAND_EDGES,FACE_EDGES,bboxFromPoints}from './core.js';
+import {makeROI,clamp,worldPoint,estimateDistance,BODY_EDGES,HAND_EDGES,FACE_EDGES,bboxFromPoints}from './core.js';
 export {BODY_EDGES,HAND_EDGES,FACE_EDGES,bboxFromPoints};
 export const POSE={width:192,height:256,count:133};
+export function configurePose(model){POSE.is3D=model.id.startsWith('rtmw3d-');POSE.width=POSE.is3D?288:192;POSE.height=POSE.is3D?384:256;}
 export const FACE_IDS=new Set(Array.from({length:68},(_,i)=>23+i)),HAND_IDS=new Set(Array.from({length:42},(_,i)=>91+i)),BODY_IDS=new Set(Array.from({length:23},(_,i)=>i));
 export const groupOf=id=>id<23?'body':id<91?'face':'hand';
-export const personROI=(bbox,padding=1.25)=>({...makeROI(bbox,192,256,padding),bbox:bbox.slice(0,4)});
+export const personROI=(bbox,padding=1.25)=>({...makeROI(bbox,POSE.width,POSE.height,padding),bbox:bbox.slice(0,4)});
 const names=['nose','left_eye','right_eye','left_ear','right_ear','left_shoulder','right_shoulder','left_elbow','right_elbow','left_wrist','right_wrist','left_hip','right_hip','left_knee','right_knee','left_ankle','right_ankle','left_big_toe','left_small_toe','left_heel','right_big_toe','right_small_toe','right_heel'];
 export function decode2D(outputs,roi,width,height){
+  if(POSE.is3D)return decode3D(outputs,roi,width,height);
   const tx=outputs.simcc_x,ty=outputs.simcc_y;
   for(const[t,bins]of [[tx,384],[ty,512]])if(!t||t.dims.join()!==[1,133,bins].join()||t.data.some(v=>!Number.isFinite(v)))throw Error('RTMWのSimCC出力が不正です');
   const peak=(t,id)=>{let value=-Infinity,index=0,n=t.dims[2];for(let i=0;i<n;i++){const v=t.data[id*n+i];if(v>value){value=v;index=i;}}return[index/2,value];};
   return Array.from({length:133},(_,id)=>{const[px,sx]=peak(tx,id),[py,sy]=peak(ty,id),rawScore=Math.min(sx,sy),x=roi.x+px/192*roi.width,y=roi.y+py/256*roi.height;
     return{id,name:names[id]||`${groupOf(id)}_${id}`,x,y,rawScore,score:clamp(rawScore,0,1),valid:rawScore>0,inFrame:rawScore>0&&x>=0&&x<width&&y>=0&&y<height,relativeZ:null,relativeModel:[null,null,null],relativeDisplay:[null,null,null],predictedCameraPosition:null,depthSource:'unavailable'};});
+}
+function decode3D(outputs,roi,width,height){
+  const xyz=outputs.keypoints,scores=outputs.scores;
+  if(xyz?.dims.join()!=='1,133,3'||scores?.dims.join()!=='1,133'||xyz.data.some(v=>!Number.isFinite(v))||scores.data.some(v=>!Number.isFinite(v)))throw Error('RTMW3Dの関節・スコア出力が不正です');
+  const points=Array.from({length:133},(_,id)=>{
+    const px=xyz.data[id*3],py=xyz.data[id*3+1],z=xyz.data[id*3+2],rawScore=scores.data[id];
+    const x=roi.x+px/288*roi.width,y=roi.y+py/384*roi.height;
+    return{id,name:names[id]||`${groupOf(id)}_${id}`,x,y,rawScore,score:clamp(rawScore,0,1),valid:rawScore>0,inFrame:rawScore>0&&x>=0&&x<width&&y>=0&&y<height,relativeZ:z,relativeModel:[(px-144)*2.1744869/144,(py-192)*2.1744869/144,z],predictedCameraPosition:null,depthSource:'model-root-relative-z'};
+  });
+  const root=[0,1,2].map(c=>(points[11].relativeModel[c]+points[12].relativeModel[c])/2);
+  for(const p of points){const q=p.relativeModel.map((v,c)=>v-root[c]);p.relativeDisplay=[q[0],-q[1],q[2]];}
+  return points;
+}
+export function locate3D(points,c,threshold,previous,dt){
+  const solution=estimateDistance(points,c,threshold,previous,dt);
+  if(!solution)return null;
+  for(const p of points){const q=solution.camera[p.id];if(q){const relative=q.map((v,c)=>v-solution.rootCameraPosition[c]);p.relativeModel=relative;p.relativeDisplay=[relative[0],-relative[1],relative[2]];}}
+  return{...solution,method:'model-relative-z-and-calibrated-bone-length',depthAmbiguous:true};
 }
 const distance=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
 const huber=x=>Math.abs(x)<.15?.5*x*x:.15*(Math.abs(x)-.075);
