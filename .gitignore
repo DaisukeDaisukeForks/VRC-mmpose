@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+*.onnx
+*.onnx.data
+*.zip
+*.tar.gz
+.sites-runtime/
+.sites-checkout-*/

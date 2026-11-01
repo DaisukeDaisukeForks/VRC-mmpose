@@ -1,0 +1,38 @@
+name: Verify Phase 1
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  geometry-and-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax and source contracts
+        run: |
+          node --check dist/app.js
+          node --check dist/core.js
+          node --check dist/model-cache.js
+          node --check dist/view3d.js
+          node --check dist/sw.js
+          node --check serve.mjs
+          node --test tests/core.test.mjs
+  onnx-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install onnxruntime==1.23.2 numpy==2.2.6 pillow==11.3.0
+      - uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: rtmw3dx-a4f0d54c-rtmdets-6bdd0110
+      - name: Verify actual ONNX and CPU inference
+        run: python scripts/verify-model.py

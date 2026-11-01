@@ -1,0 +1,1 @@
+{"name":"vrc-mmpose","version":"0.1.0","private":true,"type":"module","description":"Browser-local RTMW3D-X video pose tracking","scripts":{"start":"node serve.mjs"},"engines":{"node":">=22"}}
