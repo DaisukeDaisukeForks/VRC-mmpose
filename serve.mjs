@@ -3,7 +3,7 @@ import {createReadStream}from 'node:fs';
 import {stat}from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath}from 'node:url';
-const root=fileURLToPath(new URL('./dist/',import.meta.url)),port=Number(process.env.PORT||4173);
+const root=path.resolve(fileURLToPath(new URL('./dist/',import.meta.url))),port=Number(process.env.PORT||4173);
 const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json','.svg':'image/svg+xml','.md':'text/plain; charset=utf-8','.mp4':'video/mp4','.wasm':'application/wasm'};
 const server=http.createServer(async(req,res)=>{
   if(!['GET','HEAD'].includes(req.method)){res.writeHead(405);res.end();return;}
