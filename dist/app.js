@@ -3,6 +3,7 @@ import {POSE,configurePose,locate3D,BODY_EDGES,HAND_EDGES,FACE_EDGES,FACE_IDS,HA
 import {initRuntime as loadRuntime,RUNTIME_VERSION}from './runtime.js';
 import {MODELS,MODEL_VARIANTS,MODEL_CACHE,loadModel,cacheSummary,validateModel}from './model-cache.js';
 import {PoseView}from './view3d.js';
+import {createExecution}from './gpu-execution.js';
 
 const $=id=>document.getElementById(id),video=$('source-video'),canvas=$('overlay'),ctx=canvas.getContext('2d');
 const view=new PoseView($('pose3d')),crop=document.createElement('canvas'),cropCtx=crop.getContext('2d',{willReadFrequently:true});
@@ -10,7 +11,7 @@ crop.width=POSE.width;crop.height=POSE.height;
 const detectionCanvas=document.createElement('canvas'),detectionCtx=detectionCanvas.getContext('2d',{willReadFrequently:true});
 detectionCanvas.width=detectionCanvas.height=640;
 const filter=new OneEuro();
-const state={ort:null,session:null,detector:null,backend:'webgpu',busy:false,loading:false,running:false,sourceURL:null,videoVersion:0,token:0,
+const state={ort:null,session:null,runner:null,detector:null,backend:'webgpu',busy:false,loading:false,running:false,sourceURL:null,videoVersion:0,token:0,
   bbox:null,manual:null,roi:null,points:null,distance:null,previousDistance:null,calibration:null,worldOrigin:null,
   records:[],timings:[],modelInfo:null,detectorInfo:null,frame:0,frameTimes:[],lastMediaTime:null,threshold:.3,
   startTime:0,wallMs:0,mediaSeconds:0,warmupMs:null,warmupShape:null,logs:[],detectorError:null,localModel:null,needsReload:false,
@@ -24,6 +25,7 @@ $('dismiss-error').onclick=()=>$('error-panel').hidden=true;
 function updateDiagnostics(){
   $('diagnostics').textContent=[`Model: ${MODELS.pose.repo}@${MODELS.pose.revision}`,`Backend: ${state.backend} / ${RUNTIME_VERSION} / ${state.layout}`,
     `WebGPU: ${navigator.gpu?'APIあり':'APIなし'} / secureContext: ${isSecureContext}`,
+    `GPU buffer reuse: ${!!state.runner} / Graph Capture: false`,
     `Source: ${video.videoWidth||0} × ${video.videoHeight||0} / pixel coordinates before crop`,
     state.modelInfo?`SHA-256: ${state.modelInfo.sha256}\nCache source: ${state.modelInfo.source}`:'',
     state.session?`Inputs: ${state.session.inputNames.join(', ')}\nOutputs: ${state.session.outputNames.join(', ')}\nOutput shape: ${JSON.stringify(state.warmupShape)}\nWarm-up: ${state.warmupMs?.toFixed(1)} ms (計測から除外)`:'',
@@ -55,7 +57,7 @@ async function prepareModel(){
       log(`GPU adapter: ${adapter.info?.vendor||'unknown'} / ${adapter.info?.architecture||'unknown'} / fallback=${adapter.isFallbackAdapter??'unknown'}`);
     }
     const ort=await initRuntime();
-    if(state.session){await state.session.release();state.session=null;}
+    await releasePose();
     if(state.detector){await state.detector.release();state.detector=null;}
     let model;
     if(state.localModel){const bytes=new Uint8Array(await state.localModel.arrayBuffer());model={bytes,sha256:await validateModel(bytes,MODELS.pose),source:'local-file'};}
@@ -65,19 +67,21 @@ async function prepareModel(){
     for(const layout of layouts){
       state.layout=layout;$('model-status').textContent='実モデルの初回推論を実行中';
       try{
-        state.session=await ort.InferenceSession.create(model.bytes,{executionProviders:state.backend==='webgpu'?[{name:'webgpu',preferredLayout:layout}]:['wasm'],graphOptimizationLevel:'all'});
-        const feeds=poseFeeds(new Float32Array(3*POSE.width*POSE.height)),started=performance.now();let out;
-        try{out=await state.session.run(feeds);decode2D(out,{x:0,y:0,width:POSE.width,height:POSE.height},POSE.width,POSE.height);state.warmupMs=performance.now()-started;state.warmupShape=Object.fromEntries(Object.entries(out).map(([k,v])=>[k,v.dims]));}
-        finally{Object.values(feeds).forEach(t=>t.dispose());if(out)Object.values(out).forEach(t=>t.dispose());}
+        if(MODELS.pose.gpuIO&&state.backend==='webgpu'){
+          state.runner=await createExecution(ort,model.bytes,{layout,gpuIO:true,capture:false});state.session=state.runner.session;
+        }else state.session=await ort.InferenceSession.create(model.bytes,{executionProviders:state.backend==='webgpu'?[{name:'webgpu',preferredLayout:layout}]:['wasm'],graphOptimizationLevel:'all'});
+        const started=performance.now();let out;
+        try{out=await runPose(new Float32Array(3*POSE.width*POSE.height));decode2D(out,{x:0,y:0,width:POSE.width,height:POSE.height},POSE.width,POSE.height);state.warmupMs=performance.now()-started;state.warmupShape=Object.fromEntries(Object.entries(out).map(([k,v])=>[k,v.dims]));}
+        finally{if(out)Object.values(out).forEach(t=>t.dispose());}
         lastError=null;break;
-      }catch(e){lastError=e;log(layout+': '+e.message);if(state.session)await state.session.release().catch(()=>{});state.session=null;}
+      }catch(e){lastError=e;log(layout+': '+e.message);await releasePose().catch(()=>{});}
     }
     model.bytes=null;if(lastError)throw lastError;log('Actual RTMW warm-up succeeded');
     state.needsReload=false;$('model-status').textContent=`推論確認済み · ${state.backend==='webgpu'?'WebGPU':'WASM（CPU診断）'}`;$('download-size').textContent='SHA-256 一致';$('model-progress').value=100;$('load-model').innerHTML='再読み込み <span>↻</span>';
     if(state.modelInfo.warning)error(state.modelInfo.warning,'推論は実行できます');
     if(video.videoWidth)await inferFrame(false);
   }catch(e){
-    if(state.session){await state.session.release().catch(()=>{});state.session=null;}
+    await releasePose().catch(()=>{});
     $('model-status').textContent='準備中に問題が発生';error(`${String(e.message||e)}\n再試行、または同じモデルのローカルONNXを指定できます。`,'モデル準備を完了できませんでした');
   }finally{state.loading=false;enableControls();await refreshCache();updateROIHint();updateDiagnostics();}
 }
@@ -90,6 +94,11 @@ async function prepareDetector(){
   model.bytes=null;state.detectorError=null;log(`Detector loaded: ${state.detector.inputNames} → ${state.detector.outputNames} (WASM / NMS)`);
 }
 function poseFeeds(image){return{input:new state.ort.Tensor('float32',image,[1,3,POSE.height,POSE.width])};}
+async function releasePose(){const runner=state.runner,session=state.session;state.runner=null;state.session=null;if(runner)await runner.release();else if(session)await session.release();}
+async function runPose(data){
+  if(state.runner){const r=await state.runner.run(data);return{keypoints:{dims:[1,133,3],data:r.points,dispose(){}},scores:{dims:[1,133],data:r.scores,dispose(){}}};}
+  const feeds=poseFeeds(data);try{return await state.session.run(feeds);}finally{Object.values(feeds).forEach(t=>t.dispose());}
+}
 function solvePose(points,dt=1/60,previous=state.previousDistance){
   const c=state.calibration||calibrationFromValues({height:num('height'),fov:num('fov'),cameraHeight:num('camera-height'),cameraPitch:num('camera-pitch'),thigh:num('thigh'),shin:num('shin')},video.videoWidth,video.videoHeight);
   return POSE.is3D?locate3D(points,c,state.threshold,previous,dt):lift2D(points,c,state.threshold,previous,dt,num('depth-direction'));
@@ -160,8 +169,8 @@ async function inferFrame(record=true){
     // drawImage clips the source at boundaries; a transform preserves virtual, offscreen ROI padding.
     cropCtx.save();cropCtx.setTransform(POSE.width/roi.width,0,0,POSE.height/roi.height,-roi.x*POSE.width/roi.width,-roi.y*POSE.height/roi.height);cropCtx.drawImage(video,0,0);cropCtx.restore();
     const data=normalizeRGBA(cropCtx.getImageData(0,0,POSE.width,POSE.height).data,POSE.width,POSE.height);
-    const feeds=poseFeeds(data),afterPre=performance.now();
-    let out;try{out=await state.session.run(feeds);}finally{Object.values(feeds).forEach(t=>t.dispose());}
+    const afterPre=performance.now();
+    const out=await runPose(data);
     const afterInfer=performance.now();
     let prediction;try{prediction={points:decode2D(out,roi,video.videoWidth,video.videoHeight)};}finally{Object.values(out).forEach(t=>t.dispose());}const points=prediction.points;
     if(version!==state.videoVersion)return null;
@@ -298,7 +307,7 @@ canvas.addEventListener('pointerup',async()=>{if(!dragStart)return;dragStart=nul
 canvas.addEventListener('pointercancel',()=>dragStart=null);
 function download(name,body,type){const url=URL.createObjectURL(new Blob([body],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function benchmark(){const ts=state.timings;return{schema:'vrc-rtmw2d-benchmark/v2',createdAt:new Date().toISOString(),backend:state.backend,mode:$('execution-mode').value,
-  model:{...MODELS.pose,actual:state.modelInfo},jointLayout:'COCO-WholeBody133',jointNames:JOINT_NAMES_FOR_EXPORT(),detector:state.detectorInfo,runtime:RUNTIME_VERSION,preferredLayout:state.layout,numericalProbe:state.probeDeltas,modelDimensions:POSE.is3D?3:2,relativeDepthSource:POSE.is3D?'model':'constrained-estimation',source:{width:video.videoWidth,height:video.videoHeight,durationSeconds:video.duration||null},
+  model:{...MODELS.pose,actual:state.modelInfo},jointLayout:'COCO-WholeBody133',jointNames:JOINT_NAMES_FOR_EXPORT(),detector:state.detectorInfo,runtime:RUNTIME_VERSION,preferredLayout:state.layout,gpuBufferReuse:!!state.runner,graphCapture:false,numericalProbe:state.probeDeltas,modelDimensions:POSE.is3D?3:2,relativeDepthSource:POSE.is3D?'model':'constrained-estimation',source:{width:video.videoWidth,height:video.videoHeight,durationSeconds:video.duration||null},
   frames:ts.length,wallMs:state.wallMs,processedFPS:ts.length/(state.wallMs/1000||1),poseMs:{p50:percentile(ts.map(t=>t.pose),.5),p95:percentile(ts.map(t=>t.pose),.95)},
   totalMs:{p50:percentile(ts.map(t=>t.total),.5),p95:percentile(ts.map(t=>t.total),.95)},warmupExcludedMs:state.warmupMs,outputs:state.warmupShape,calibration:state.calibration,
   notes:['GPU memory not measured','RTX 5060 Ti 8GB not validated by this browser benchmark','Depth source follows selected model: RTMW 2D uses constrained estimation, RTMW3D uses model relative-Z; absolute distance remains estimated','Uncalibrated preview assumes entered height/FOV; absolute camera/world fields remain null','Only calibrated camera/world values use entered camera geometry','No camera API / no upload endpoint'],timings:ts};}
@@ -316,6 +325,6 @@ for(const variant of MODEL_VARIANTS){const option=document.createElement('option
 $('model-select').value=MODELS.pose.id;
 $('model-select').onchange=()=>{stop();MODELS.pose=MODEL_VARIANTS.find(v=>v.id===$('model-select').value);configureSelectedModel();state.localModel=null;state.needsReload=true;resetTracking();$('model-name').textContent=MODELS.pose.name;$('model-description').textContent=`${POSE.height} × ${POSE.width} · 133点 · ${POSE.is3D?'モデル3D':'2D＋模擬3D'}`;$('model-status').textContent='モデルを準備してください';enableControls();};
 $('depth-direction').onchange=()=>{state.previousDistance=null;};
-function configureSelectedModel(){configurePose(MODELS.pose);crop.width=POSE.width;crop.height=POSE.height;$('depth-direction').disabled=!!POSE.is3D;$('depth-state').textContent=POSE.is3D?'モデル出力の骨盤相対Z':'骨長・時系列からの模擬3D';}
+function configureSelectedModel(){configurePose(MODELS.pose);crop.width=POSE.width;crop.height=POSE.height;$('model-name').textContent=MODELS.pose.name;$('model-description').textContent=`${POSE.height} × ${POSE.width} · 133点 · ${POSE.is3D?'モデル3D':'2D＋模擬3D'}`;$('download-size').textContent=mb(MODELS.pose.size);$('depth-direction').disabled=!!POSE.is3D;$('depth-state').textContent=POSE.is3D?'モデル出力の骨盤相対Z':'骨長・時系列からの模擬3D';}
 configureSelectedModel();
 updateDiagnostics();refreshCache();enableControls();
