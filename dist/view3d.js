@@ -12,26 +12,37 @@ export class PoseView{
   }
   reset(){this.yaw=.22;this.pitch=.12;this.zoom=1;this.draw();}
   update(points,distance,options={}){this.points=points;this.distance=distance;Object.assign(this,options);this.draw();}
-  project(point,w,h){
+  cameraPlane(point){
     let[x,y,z]=point;
     const cy=Math.cos(this.yaw),sy=Math.sin(this.yaw),cp=Math.cos(this.pitch),sp=Math.sin(this.pitch);
     const xx=x*cy+z*sy,zz=-x*sy+z*cy,yy=y*cp-zz*sp,depth=y*sp+zz*cp;
-    const scale=Math.min(w,h)*.68*this.zoom/(1+depth*.14);
-    return [w/2+xx*scale,h*.48-yy*scale];
+    const perspective=Math.max(.25,1+depth*.14);
+    return [xx/perspective,yy/perspective];
+  }
+  project(point,w,h){
+    const[x,y]=this.cameraPlane(point),fit=this.fit||{x:0,y:0,scale:Math.min(w,h)*.4};
+    return [w/2+(x-fit.x)*fit.scale*this.zoom,h/2-(y-fit.y)*fit.scale*this.zoom];
   }
   draw(){
     const{canvas,ctx}=this,w=canvas.clientWidth||480,h=canvas.clientHeight||360,dpr=Math.min(devicePixelRatio||1,2);
     if(canvas.width!==Math.round(w*dpr)||canvas.height!==Math.round(h*dpr)){canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);}
     ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#102a23';ctx.fillRect(0,0,w,h);
     const drawLine=(a,b,color,width=1)=>{const aa=this.project(a,w,h),bb=this.project(b,w,h);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(...aa);ctx.lineTo(...bb);ctx.stroke();};
-    const floor=this.world?-.8:-.95;
-    for(let i=-10;i<=10;i++){const p=i*.25;drawLine([p,floor,-2.5],[p,floor,2.5],i===0?'#3e5c47':'#244638');drawLine([-2.5,floor,p],[2.5,floor,p],i===0?'#3e5c47':'#244638');}
-    if(!this.points)return;
-    const coords=this.points.map((p,i)=>{
+    const coords=(this.points||[]).map((p,i)=>{
       if(this.world){const q=this.distance?.world[i];if(!q)return null;return[q[0],q[1]-.8,q[2]-(this.worldOrigin??0)];}
       return p.relativeDisplay;
     });
-    const visible=i=>coords[i]&&coords[i].every(Number.isFinite)&&this.points[i].score>=this.threshold&&this.points[i].inFrame;
+    // A regressed 3D joint remains drawable when its separate 2D head is off-image.
+    const visible=i=>coords[i]&&coords[i].every(Number.isFinite)&&this.points[i].valid!==false&&this.points[i].score>=this.threshold;
+    const enabled=i=>!(FACE_IDS.has(i)&&!this.showFace)&&!(HAND_IDS.has(i)&&!this.showHands);
+    const plane=coords.flatMap((q,i)=>visible(i)&&enabled(i)?[this.cameraPlane(q)]:[]);
+    if(plane.length){
+      const xs=plane.map(p=>p[0]),ys=plane.map(p=>p[1]),left=Math.min(...xs),right=Math.max(...xs),bottom=Math.min(...ys),top=Math.max(...ys);
+      this.fit={x:(left+right)/2,y:(bottom+top)/2,scale:Math.min(w*.82/Math.max(.5,right-left),h*.82/Math.max(1.2,top-bottom))};
+    }else this.fit=null;
+    const floor=this.world?-.8:-.95;
+    for(let i=-10;i<=10;i++){const p=i*.25;drawLine([p,floor,-2.5],[p,floor,2.5],i===0?'#3e5c47':'#244638');drawLine([-2.5,floor,p],[2.5,floor,p],i===0?'#3e5c47':'#244638');}
+    if(!this.points)return;
     const edges=[...BODY_EDGES.map(e=>[e,'#c4e58f',2]),...(this.showHands?HAND_EDGES.map(e=>[e,'#69c9b2',1.2]):[]),...(this.showFace?FACE_EDGES.map(e=>[e,'#bdaf8f',.75]):[])];
     for(const[[a,b],color,width]of edges)if(visible(a)&&visible(b))drawLine(coords[a],coords[b],color,width);
     for(let i=0;i<coords.length;i++){
