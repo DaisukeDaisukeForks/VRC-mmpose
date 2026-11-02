@@ -160,7 +160,7 @@ function updatePoseUI(){
   $('tracking-state').hidden=!video.videoWidth;$('tracking-state').textContent=p?`${count()} / 133 点`:$('roi-mode').value==='manual'&&!state.manual?'ROI指定待ち':'推論待ち';
 }
 async function inferFrame(record=true){
-  if(state.busy||!state.session||!video.videoWidth||video.readyState<2)return null;
+  if(state.busy||!state.session||state.needsReload||!video.videoWidth||video.readyState<2)return null;
   state.busy=true;enableControls();const start=performance.now(),version=state.videoVersion;
   try{
     const roi=await chooseROI(),afterDetect=performance.now();if(version!==state.videoVersion)return null;

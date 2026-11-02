@@ -1,8 +1,10 @@
 import {MODEL_VARIANTS}from './rtmw-models.js';
+import {EXTRA_MODELS}from './extra-models.js';
+MODEL_VARIANTS.push(...EXTRA_MODELS);
 export {MODEL_VARIANTS};
 export const MODEL_CACHE='vrc-mmpose-models-v1';
 export const MODELS={
-  pose:MODEL_VARIANTS.find(v=>v.id==='rtmw3d-l-fp32-gpu-decoder'),
+  pose:MODEL_VARIANTS.find(v=>v.id==='rtmpose-s-256x192-fp32'),
   detector:{name:'RTMDet-s',repo:'ziq/rtm',revision:'6bdd0110307167f5f003e92e34099a21bd61283c',path:'rtmdet-s.onnx',size:40309222,sha256:'3bb7246a8b5104dd94e9f9bbfcf92d2cd9e55d344a9a5e8b7b84ebcfeedafe14'}
 };
 export const modelURL=m=>`https://huggingface.co/${m.repo}/resolve/${m.revision}/${m.path}`;

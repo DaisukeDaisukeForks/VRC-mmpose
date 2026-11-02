@@ -1,5 +1,5 @@
-const APP_CACHE='vrc-mmpose-app-rtmw-select-v5';
-const LOCAL=['./','./index.html','./style.css','./app.js','./core.js','./rtmw2d.js','./rtmw-models.js','./runtime.js','./ort-patch.js','./model-cache.js','./gpu-execution.js','./view3d.js','./favicon.svg','./architecture.md'];
+const APP_CACHE='vrc-mmpose-app-rtmw-select-v6';
+const LOCAL=['./','./index.html','./style.css','./app.js','./core.js','./rtmw2d.js','./rtmw-models.js','./runtime.js','./ort-patch.js','./model-cache.js','./gpu-execution.js','./extra-models.js','./view3d.js','./favicon.svg','./architecture.md'];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(APP_CACHE).then(c=>c.addAll(LOCAL)).then(()=>self.skipWaiting()));});
 self.addEventListener('activate',event=>{event.waitUntil((async()=>{for(const name of await caches.keys())if(name.startsWith('vrc-mmpose-app-')&&name!==APP_CACHE)await caches.delete(name);await self.clients.claim();})());});
 self.addEventListener('fetch',event=>{
